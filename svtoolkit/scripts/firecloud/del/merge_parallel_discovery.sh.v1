@@ -1,0 +1,91 @@
+#!/bin/bash
+
+filePrefix=$1
+partitionsArchiveList=$2
+storeReadPairFile=$3
+referenceBundle=$4
+
+if [ -z "${referenceBundle}" ]; then
+    echo "Usage: merge_parallel_discovery.sh <filePrefix> <partitionsArchiveList> <storeReadPairFile> <referenceBundle>" && exit 1
+fi
+
+source ${SV_DIR}/scripts/firecloud/gs_extract_reference.sh ${referenceBundle} || exit 1
+
+SV_TMPDIR=tmp
+mkdir -p ${SV_TMPDIR}
+runDir=del_output
+mkdir -p ${runDir}/genotyping || exit 1
+mkdir -p ${runDir}/logs || exit 1
+
+java -cp ${SV_CLASSPATH} -Xmx4g \
+    org.broadinstitute.gatk.queue.QCommandLine \
+    -S ${SV_DIR}/scripts/firecloud/UnarchiveData.q \
+    -S ${SV_DIR}/qscript/SVQScript.q \
+    -gatk ${SV_DIR}/lib/gatk/GenomeAnalysisTK.jar \
+    -cp ${SV_CLASSPATH} \
+    -R ${referenceFile} \
+    -archive ${partitionsArchiveList} \
+    -deleteArchives false \
+    -O del_input \
+    -tempDir ${SV_TMPDIR} \
+    -jobLogDir ${SV_TMPDIR} \
+    -jobRunner ParallelShell \
+    -run \
+    || exit 1
+
+find del_input -name gs_dels.sites.vcf.gz > discovery_vcfs.list
+
+java -cp $SV_CLASSPATH -Xmx4g \
+    org.broadinstitute.sv.apps.MergeVCFFiles \
+    -R $referenceFile \
+    -vcf discovery_vcfs.list \
+    -O ${runDir}/gs_dels.sites.vcf.gz \
+    || exit 1
+
+if [ "${storeReadPairFile}" == "true" ]; then
+    samtools merge -c -p ${runDir}/gs_dels.sites.pairs.bam `find del_input -name '*.pairs.bam' | xargs` || exit 1
+    samtools index ${runDir}/gs_dels.sites.pairs.bam || exit 1
+fi
+
+find del_input -name gs_dels.genotypes.vcf.gz > genotypes_vcfs.list
+
+java -cp $SV_CLASSPATH -Xmx4g \
+    org.broadinstitute.sv.apps.MergeVCFFiles \
+    -R $referenceFile \
+    -vcf genotypes_vcfs.list \
+    -O ${runDir}/genotyping/gs_dels.genotypes.vcf.gz \
+    || exit 1
+
+evalDir=${gtDir}/eval
+mkdir -p ${evalDir} || exit 1
+
+# Generate useful report files
+echo "Generating reports..."
+
+vcfextract \
+    -fields ID,CHROM,POS,INFO:END,INFO:GSELENGTH \
+    ${gtDir}/${filePrefix}.genotypes.vcf.gz \
+    | awk -v OFS="\t" '{ if (NR == 1) { $6 = "LENGTH"; $7 = "DENSITY" } else { $6 = $4-$3+1; $7 = sprintf("%1.4f", $5/$6) }; print }' \
+    > ${evalDir}/VariantLength.report.dat || exit 1
+
+auxFilePrefix="${gtDir}/${filePrefix}.genotypes"
+
+java -cp ${SV_CLASSPATH} -Xmx4g \
+    org.broadinstitute.sv.main.SVAnnotator \
+        -R ${referenceFile} \
+        -vcf ${gtDir}/${filePrefix}.genotypes.vcf.gz \
+        -auxFilePrefix ${auxFilePrefix} \
+        -A CopyNumberClass \
+        -A VariantsPerSample \
+        -A GCContent \
+        -writeReport true \
+        -writeSummary true \
+        -reportDirectory ${evalDir} \
+        || exit 1
+
+#        -A ClusterSeparation \
+
+cat ${evalDir}/VariantsPerSample.report.dat | cut -f 1 | tail -n +2 > ${runDir}/samples.list || exit 1
+
+tar -cvzf del_output.tar.gz ${runDir} || exit 1
+

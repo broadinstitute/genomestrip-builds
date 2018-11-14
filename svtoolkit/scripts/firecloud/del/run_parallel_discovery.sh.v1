@@ -1,0 +1,88 @@
+#!/bin/bash
+
+partitionName=$1
+partitionArgs="$2"
+storeReadPairFile=$3
+mdPath=$4
+bamFileList=$5
+referenceBundle=$6
+repeatTrackFile=$7
+credentialsKeyFile=$8
+
+if [ -z "${credentialsKeyFile}" ]; then
+    echo "Usage: run_parallel_discovery.sh <partitionName> <partitionArgs> <storeReadPairFile> <mdPath> <bamFileList> <referenceBundle> <repeatTrackFile> <credentialsKeyFile>" && exit 1
+fi
+
+filePrefix=gs_dels
+
+echo "Exporting GOOGLE_APPLICATION_CREDENTIALS..."
+export GOOGLE_APPLICATION_CREDENTIALS=${credentialsKeyFile}
+
+source ${SV_DIR}/scripts/firecloud/gs_extract_reference.sh ${referenceBundle} || exit 1
+
+SV_TMPDIR=tmp
+mkdir -p ${SV_TMPDIR}
+runDir=del_output
+mkdir -p ${runDir}/logs || exit 1
+
+java -Xmx2g -cp ${SV_CLASSPATH} \
+    org.broadinstitute.sv.apps.ZipExtract \
+    -I ${mdPath} \
+    -file sample_gender.report.txt \
+    || exit 1
+
+# Avoid problem with certain read pairs - this should be debugged
+extraArgs="-P select.validateReadPairs:false"
+
+for attempt in {1..2}; do
+
+    echo $(date +"[%b %d %H:%M:%S] Running Deletion discovery for partition ${partitionName}, attempt=${attempt}")
+
+java -cp ${SV_CLASSPATH} -Xmx4g \
+    org.broadinstitute.sv.main.SVDiscovery \
+    -T SVDiscoveryWalker \
+    -configFile ${SV_DIR}/conf/genstrip_parameters.txt \
+    -tempDir ${SV_TMPDIR} \
+    -R ${referenceFile} \
+    -md ${mdPath} \
+    -genderMapFile sample_gender.report.txt \
+    -I ${bamFileList} \
+    -disableGATKTraversal true \
+    -partitionName ${partitionName} \
+    ${partitionArgs} \
+    -runFilePrefix ${filePrefix} \
+    -storeReadPairFile ${storeReadPairFile} \
+    ${extraArgs} \
+    -runDirectory ${runDir} \
+    -O ${runDir}/gs_dels.sites.unfiltered.vcf.gz \
+    || exit 1
+
+    rc=$?
+    echo $(date +"[%b %d %H:%M:%S] Deletion discovery completed, rc=${rc}")
+
+    if [ "${rc}" -eq 0 ]; then
+        break
+    fi
+done
+
+if [ "${rc}" -ne 0 ]; then
+    echo "Error running Deletion discovery" && exit 1
+fi
+
+$(dirname $0)/apply_default_filters.sh \
+    ${runDir} ${referenceFile} \
+    || exit 1
+
+$(dirname $0)/genotype_discovered_sites.sh \
+    ${mdPath} \
+    ${bamFileList} \
+    ${filePrefix} \
+    ${runDir} \
+    ${referenceFile} \
+    ${repeatTrackFile}
+
+echo "Archiving output..."
+
+tar -cvzf ${partitionName}_del_output.tar.gz del_output
+
+#find ${runDir} -name '*.discovery.pairs.bam' -o -name '*.discovery.vcf.gz' | tar -cvzf del_output.tar.gz -T -

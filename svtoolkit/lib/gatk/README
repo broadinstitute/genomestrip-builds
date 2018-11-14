@@ -1,0 +1,13 @@
+Steps to build a patched htsjdk-2.8.1-gs.jar:
+1. Checkout htsjdk-2.8.1
+git clone https://github.com/samtools/htsjdk.git .
+git checkout 2.8.1
+2. Apply PR #801
+git remote add cmnbroad git@github.com:cmnbroad/htsjdk.git
+git fetch cmnbroad
+git checkout cmnbroad/cn_cram_md5
+3. Fix a bug in src/main/java/htsjdk/samtools/SamReaderFactory.java
+-                if (type == InputResource.Type.SEEKABLE_STREAM || type == InputResource.Type.URL) {
++                if (type == InputResource.Type.SEEKABLE_STREAM || type == InputResource.Type.PATH || type == InputResource.Type.URL) {
+4. Build
+./gradlew clean jar
